@@ -10,7 +10,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
 const UPI_ID = process.env.UPI_ID || "kesavakumarn-2@okicici";
 
 // Initialize Supabase Client
