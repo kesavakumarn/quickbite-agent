@@ -10,8 +10,15 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
 const UPI_ID = process.env.UPI_ID || "kesavakumarn-2@okicici";
+
+// List of models to try in order of preference / generosity
+const GEMINI_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+];
 
 // Initialize Supabase Client
 const supabase = createClient(
@@ -34,12 +41,77 @@ function calculateTotal(cart) {
   return cart.reduce((sum, item) => sum + item.price * item.qty, 0);
 }
 
+// Helper: Call Gemini with model fallbacks and 429 retry backoff
+async function callGeminiWithFallback(body) {
+  if (!GEMINI_API_KEY) {
+    throw new Error("Missing GEMINI_API_KEY environment variable/secret.");
+  }
+
+  let lastError = null;
+
+  for (const model of GEMINI_MODELS) {
+    let retryCount = 0;
+    const maxRetries = 2;
+
+    while (retryCount <= maxRetries) {
+      try {
+        console.log(
+          `Trying model: ${model}` +
+            (retryCount > 0 ? ` (retry ${retryCount})` : "")
+        );
+
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+
+        // If rate limited (429), wait and retry
+        if (resp.status === 429) {
+          if (retryCount < maxRetries) {
+            const waitTime = Math.pow(2, retryCount) * 5000; // 5s, 10s
+            console.log(
+              `  -> Rate-limited (429). Waiting ${waitTime / 1000}s before retry...`
+            );
+            await new Promise((resolve) => setTimeout(resolve, waitTime));
+            retryCount++;
+            continue;
+          } else {
+            console.log(`  -> ${model} exhausted retries. Trying next model...`);
+            lastError = `${model}: 429 Too Many Requests`;
+            break;
+          }
+        }
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          throw new Error(`HTTP ${resp.status}: ${errText}`);
+        }
+
+        const data = await resp.json();
+        console.log(`  -> Success with ${model}`);
+        return data;
+      } catch (err) {
+        console.log(`  -> ${model} failed: ${err.message}`);
+        lastError = err.message;
+        break; // break inner while to move to next model
+      }
+    }
+  }
+
+  throw new Error(`All Gemini models failed. Last error: ${lastError}`);
+}
+
 // ---------------- ENDPOINTS ----------------
 
 // 1. Fetch Dynamic Menu from Supabase DB
 app.get("/api/menu", async (req, res) => {
   try {
-    const { data: menu, error } = await supabase.from("menu").select("*").eq("is_available", true);
+    const { data: menu, error } = await supabase
+      .from("menu")
+      .select("*")
+      .eq("is_available", true);
     if (error) throw error;
     res.json({ menu });
   } catch (err) {
@@ -47,7 +119,7 @@ app.get("/api/menu", async (req, res) => {
   }
 });
 
-// 2. Chat Endpoint (Gemini AI Agent)
+// 2. Chat Endpoint (Gemini AI Agent with Fallbacks)
 app.post("/api/chat", async (req, res) => {
   try {
     const { sessionId, message } = req.body;
@@ -58,7 +130,11 @@ app.post("/api/chat", async (req, res) => {
     const cart = getCart(sessionId);
 
     // Dynamic Menu fetch for AI context
-    const { data: menuItems } = await supabase.from("menu").select("*").eq("is_available", true);
+    const { data: menuItems } = await supabase
+      .from("menu")
+      .select("*")
+      .eq("is_available", true);
+
     const menuContext = (menuItems || [])
       .map((m) => `${m.name} (ID: ${m.id}) - ₹${m.price} - ${m.description}`)
       .join("\n");
@@ -98,28 +174,20 @@ Note: Set ready_to_checkout to true ONLY when cart has at least 1 item AND all 4
       generationConfig: { temperature: 0.2, responseMimeType: "application/json" },
     };
 
-    const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }
-    );
-
-    if (!resp.ok) {
-      const errText = await resp.text();
-      return res.status(502).json({ error: "Gemini API error", detail: errText });
-    }
-
-    const data = await resp.json();
+    // Execute Gemini API call with Fallback strategy
+    const data = await callGeminiWithFallback(body);
     const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
 
     let parsed;
     try {
       parsed = JSON.parse(rawText);
     } catch {
-      parsed = { reply: rawText, cart_actions: [], customer_details: {}, ready_to_checkout: false };
+      parsed = {
+        reply: rawText,
+        cart_actions: [],
+        customer_details: {},
+        ready_to_checkout: false,
+      };
     }
 
     // Process Cart Actions Server-Side
@@ -138,7 +206,13 @@ Note: Set ready_to_checkout to true ONLY when cart has at least 1 item AND all 4
 
       if (action.action === "add") {
         if (existing) existing.qty += qty;
-        else cart.push({ itemId: itemMatch.id, name: itemMatch.name, price: itemMatch.price, qty });
+        else
+          cart.push({
+            itemId: itemMatch.id,
+            name: itemMatch.name,
+            price: itemMatch.price,
+            qty,
+          });
       } else if (action.action === "remove" && existing) {
         existing.qty -= qty;
         if (existing.qty <= 0) {
@@ -156,7 +230,7 @@ Note: Set ready_to_checkout to true ONLY when cart has at least 1 item AND all 4
       readyToCheckout: !!parsed.ready_to_checkout,
     });
   } catch (err) {
-    res.status(500).json({ error: "Internal Server Error", detail: err.message });
+    res.status(502).json({ error: "Gemini API error", detail: err.message });
   }
 });
 
@@ -227,7 +301,10 @@ app.post("/api/confirm-payment", async (req, res) => {
     // Send Confirmation Email via Resend
     if (order.customer_email && order.customer_email.includes("@")) {
       const itemsList = (order.items || [])
-        .map((i) => `<li>${i.qty}x <strong>${i.name}</strong> - ₹${i.price * i.qty}</li>`)
+        .map(
+          (i) =>
+            `<li>${i.qty}x <strong>${i.name}</strong> - ₹${i.price * i.qty}</li>`
+        )
         .join("");
 
       await resend.emails.send({
@@ -254,13 +331,19 @@ app.post("/api/confirm-payment", async (req, res) => {
     // Clear cart session
     carts.delete(order.session_id);
 
-    res.json({ status: "SUCCESS", message: "Payment confirmed and notification email dispatched.", order });
+    res.json({
+      status: "SUCCESS",
+      message: "Payment confirmed and notification email dispatched.",
+      order,
+    });
   } catch (err) {
     res.status(500).json({ error: "Confirmation failed", detail: err.message });
   }
 });
 
-app.get("/health", (req, res) => res.json({ status: "ok", timestamp: new Date() }));
+app.get("/health", (req, res) =>
+  res.json({ status: "ok", timestamp: new Date() })
+);
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
