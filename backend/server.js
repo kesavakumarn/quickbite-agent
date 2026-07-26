@@ -12,6 +12,11 @@ const PORT = process.env.PORT || 8080;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const UPI_ID = process.env.UPI_ID || "kesavakumarn-2@okicici";
 
+// WhatsApp Secrets
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+
 // List of models to try in order of preference / generosity
 const GEMINI_MODELS = [
   "gemini-2.5-flash",
@@ -29,7 +34,7 @@ const supabase = createClient(
 // Initialize Resend Email Client
 const resend = new Resend(process.env.RESEND_API_KEY || "");
 
-// In-memory sessions cart (session_id -> items array)
+// In-memory sessions cart (session_id or whatsapp_phone -> items array)
 const carts = new Map();
 
 function getCart(sessionId) {
@@ -39,6 +44,31 @@ function getCart(sessionId) {
 
 function calculateTotal(cart) {
   return cart.reduce((sum, item) => sum + item.price * item.qty, 0);
+}
+
+// Helper: Send message back to WhatsApp
+async function sendWhatsAppMessage(toPhone, textMessage) {
+  if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_ID) {
+    console.error("WhatsApp credentials missing in environment variables.");
+    return;
+  }
+  const url = `https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_ID}/messages`;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: toPhone,
+        text: { body: textMessage },
+      }),
+    });
+  } catch (err) {
+    console.error("Error sending WhatsApp message:", err.message);
+  }
 }
 
 // Helper: Call Gemini with model fallbacks and 429 retry backoff
@@ -67,10 +97,9 @@ async function callGeminiWithFallback(body) {
           body: JSON.stringify(body),
         });
 
-        // If rate limited (429), wait and retry
         if (resp.status === 429) {
           if (retryCount < maxRetries) {
-            const waitTime = Math.pow(2, retryCount) * 5000; // 5s, 10s
+            const waitTime = Math.pow(2, retryCount) * 5000;
             console.log(
               `  -> Rate-limited (429). Waiting ${waitTime / 1000}s before retry...`
             );
@@ -95,7 +124,7 @@ async function callGeminiWithFallback(body) {
       } catch (err) {
         console.log(`  -> ${model} failed: ${err.message}`);
         lastError = err.message;
-        break; // break inner while to move to next model
+        break;
       }
     }
   }
@@ -103,43 +132,22 @@ async function callGeminiWithFallback(body) {
   throw new Error(`All Gemini models failed. Last error: ${lastError}`);
 }
 
-// ---------------- ENDPOINTS ----------------
+// ---------------- REUSABLE CORE LOGIC ----------------
 
-// 1. Fetch Dynamic Menu from Supabase DB
-app.get("/api/menu", async (req, res) => {
-  try {
-    const { data: menu, error } = await supabase
-      .from("menu")
-      .select("*")
-      .eq("is_available", true);
-    if (error) throw error;
-    res.json({ menu });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch menu", detail: err.message });
-  }
-});
+// Core Chat Processor
+async function processChatLogic(sessionId, message) {
+  const cart = getCart(sessionId);
 
-// 2. Chat Endpoint (Gemini AI Agent with Fallbacks)
-app.post("/api/chat", async (req, res) => {
-  try {
-    const { sessionId, message } = req.body;
-    if (!sessionId || !message) {
-      return res.status(400).json({ error: "sessionId and message are required" });
-    }
+  const { data: menuItems } = await supabase
+    .from("menu")
+    .select("*")
+    .eq("is_available", true);
 
-    const cart = getCart(sessionId);
+  const menuContext = (menuItems || [])
+    .map((m) => `${m.name} (ID: ${m.id}) - ₹${m.price} - ${m.description}`)
+    .join("\n");
 
-    // Dynamic Menu fetch for AI context
-    const { data: menuItems } = await supabase
-      .from("menu")
-      .select("*")
-      .eq("is_available", true);
-
-    const menuContext = (menuItems || [])
-      .map((m) => `${m.name} (ID: ${m.id}) - ₹${m.price} - ${m.description}`)
-      .join("\n");
-
-    const systemPrompt = `You are a polite food ordering assistant for "QuickBite".
+  const systemPrompt = `You are a polite food ordering assistant for "QuickBite".
 Available Dynamic Menu:
 ${menuContext}
 
@@ -168,116 +176,144 @@ Task Instructions:
 }
 Note: Set ready_to_checkout to true ONLY when cart has at least 1 item AND all 4 customer details (Name, Phone, Email, Address) have been collected.`;
 
-    const body = {
-      contents: [{ role: "user", parts: [{ text: message }] }],
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      generationConfig: { temperature: 0.2, responseMimeType: "application/json" },
+  const body = {
+    contents: [{ role: "user", parts: [{ text: message }] }],
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+    generationConfig: { temperature: 0.2, responseMimeType: "application/json" },
+  };
+
+  const data = await callGeminiWithFallback(body);
+  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+
+  let parsed;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch {
+    parsed = {
+      reply: rawText,
+      cart_actions: [],
+      customer_details: {},
+      ready_to_checkout: false,
     };
+  }
 
-    // Execute Gemini API call with Fallback strategy
-    const data = await callGeminiWithFallback(body);
-    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-
-    let parsed;
-    try {
-      parsed = JSON.parse(rawText);
-    } catch {
-      parsed = {
-        reply: rawText,
-        cart_actions: [],
-        customer_details: {},
-        ready_to_checkout: false,
-      };
+  for (const action of parsed.cart_actions || []) {
+    if (action.action === "clear") {
+      cart.length = 0;
+      continue;
     }
+    const itemMatch = (menuItems || []).find((m) =>
+      m.name.toLowerCase().includes((action.item_name || "").toLowerCase())
+    );
+    if (!itemMatch) continue;
 
-    // Process Cart Actions Server-Side
-    for (const action of parsed.cart_actions || []) {
-      if (action.action === "clear") {
-        cart.length = 0;
-        continue;
-      }
-      const itemMatch = (menuItems || []).find((m) =>
-        m.name.toLowerCase().includes((action.item_name || "").toLowerCase())
-      );
-      if (!itemMatch) continue;
+    const qty = Math.max(1, parseInt(action.quantity, 10) || 1);
+    const existing = cart.find((c) => c.itemId === itemMatch.id);
 
-      const qty = Math.max(1, parseInt(action.quantity, 10) || 1);
-      const existing = cart.find((c) => c.itemId === itemMatch.id);
-
-      if (action.action === "add") {
-        if (existing) existing.qty += qty;
-        else
-          cart.push({
-            itemId: itemMatch.id,
-            name: itemMatch.name,
-            price: itemMatch.price,
-            qty,
-          });
-      } else if (action.action === "remove" && existing) {
-        existing.qty -= qty;
-        if (existing.qty <= 0) {
-          const idx = cart.indexOf(existing);
-          cart.splice(idx, 1);
-        }
+    if (action.action === "add") {
+      if (existing) existing.qty += qty;
+      else
+        cart.push({
+          itemId: itemMatch.id,
+          name: itemMatch.name,
+          price: itemMatch.price,
+          qty,
+        });
+    } else if (action.action === "remove" && existing) {
+      existing.qty -= qty;
+      if (existing.qty <= 0) {
+        const idx = cart.indexOf(existing);
+        cart.splice(idx, 1);
       }
     }
+  }
 
-    res.json({
-      reply: parsed.reply || "How can I help with your order?",
-      cart,
-      total: calculateTotal(cart),
-      customerDetails: parsed.customer_details || {},
-      readyToCheckout: !!parsed.ready_to_checkout,
-    });
+  return {
+    reply: parsed.reply || "How can I help with your order?",
+    cart,
+    total: calculateTotal(cart),
+    customerDetails: parsed.customer_details || {},
+    readyToCheckout: !!parsed.ready_to_checkout,
+  };
+}
+
+// Core Checkout Processor
+async function processCheckoutLogic(sessionId, customerDetails) {
+  const cart = getCart(sessionId);
+
+  if (!cart.length) {
+    throw new Error("Cart is empty");
+  }
+
+  const total = calculateTotal(cart);
+
+  const { data: order, error } = await supabase
+    .from("orders")
+    .insert([
+      {
+        session_id: sessionId,
+        customer_name: customerDetails?.name || "Guest",
+        customer_phone: customerDetails?.phone || "N/A",
+        customer_email: customerDetails?.email || "N/A",
+        delivery_address: customerDetails?.address || "N/A",
+        items: cart,
+        total_amount: total,
+        status: "PENDING_PAYMENT",
+      },
+    ])
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  const shortOrderId = order.id.slice(0, 8);
+  const upiUrl = `upi://pay?pa=${UPI_ID}&pn=QuickBite&tr=${order.id}&am=${total}&cu=INR&tn=Order_${shortOrderId}`;
+  const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(
+    upiUrl
+  )}`;
+
+  return { orderId: order.id, total, upiUrl, qrCodeUrl, upiId: UPI_ID };
+}
+
+// ---------------- ENDPOINTS ----------------
+
+// 1. Fetch Dynamic Menu from Supabase DB
+app.get("/api/menu", async (req, res) => {
+  try {
+    const { data: menu, error } = await supabase
+      .from("menu")
+      .select("*")
+      .eq("is_available", true);
+    if (error) throw error;
+    res.json({ menu });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch menu", detail: err.message });
+  }
+});
+
+// 2. Chat Endpoint (For Frontend Web App)
+app.post("/api/chat", async (req, res) => {
+  try {
+    const { sessionId, message } = req.body;
+    if (!sessionId || !message) {
+      return res
+        .status(400)
+        .json({ error: "sessionId and message are required" });
+    }
+
+    const result = await processChatLogic(sessionId, message);
+    res.json(result);
   } catch (err) {
     res.status(502).json({ error: "Gemini API error", detail: err.message });
   }
 });
 
-// 3. Checkout: Create Order Record in Supabase DB & Generate UPI Link
+// 3. Checkout Endpoint (For Frontend Web App)
 app.post("/api/checkout", async (req, res) => {
   try {
     const { sessionId, customerDetails } = req.body;
-    const cart = getCart(sessionId);
-
-    if (!cart.length) {
-      return res.status(400).json({ error: "Cart is empty" });
-    }
-
-    const total = calculateTotal(cart);
-
-    // Save persistent order into Supabase
-    const { data: order, error } = await supabase
-      .from("orders")
-      .insert([
-        {
-          session_id: sessionId,
-          customer_name: customerDetails?.name || "Guest",
-          customer_phone: customerDetails?.phone || "N/A",
-          customer_email: customerDetails?.email || "N/A",
-          delivery_address: customerDetails?.address || "N/A",
-          items: cart,
-          total_amount: total,
-          status: "PENDING_PAYMENT",
-        },
-      ])
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    // Build Deep Link for Google Pay / UPI
-    const shortOrderId = order.id.slice(0, 8);
-    const upiUrl = `upi://pay?pa=${UPI_ID}&pn=QuickBite&tr=${order.id}&am=${total}&cu=INR&tn=Order_${shortOrderId}`;
-    const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(upiUrl)}`;
-
-    res.json({
-      orderId: order.id,
-      total,
-      upiUrl,
-      qrCodeUrl,
-      upiId: UPI_ID,
-    });
+    const result = await processCheckoutLogic(sessionId, customerDetails);
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: "Checkout error", detail: err.message });
   }
@@ -288,7 +324,6 @@ app.post("/api/confirm-payment", async (req, res) => {
   try {
     const { orderId } = req.body;
 
-    // Update status in Supabase
     const { data: order, error } = await supabase
       .from("orders")
       .update({ status: "PAID_CONFIRMED" })
@@ -298,7 +333,6 @@ app.post("/api/confirm-payment", async (req, res) => {
 
     if (error) throw error;
 
-    // Send Confirmation Email via Resend
     if (order.customer_email && order.customer_email.includes("@")) {
       const itemsList = (order.items || [])
         .map(
@@ -328,7 +362,6 @@ app.post("/api/confirm-payment", async (req, res) => {
       });
     }
 
-    // Clear cart session
     carts.delete(order.session_id);
 
     res.json({
@@ -338,6 +371,65 @@ app.post("/api/confirm-payment", async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: "Confirmation failed", detail: err.message });
+  }
+});
+
+// ---------------- WHATSAPP WEBHOOK ROUTING ----------------
+
+// 5. Meta Webhook Verification
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("WhatsApp Webhook verified!");
+    res.status(200).send(challenge);
+  } else {
+    res.sendStatus(403);
+  }
+});
+
+// 6. Receive Incoming WhatsApp Messages
+app.post("/webhook", async (req, res) => {
+  res.sendStatus(200); // Send 200 OK to Meta immediately
+
+  try {
+    const body = req.body;
+    if (body.object !== "whatsapp_business_account") return;
+
+    for (const entry of body.entry || []) {
+      for (const change of entry.changes || []) {
+        const msg = change.value?.messages?.[0];
+        if (msg && msg.type === "text") {
+          const customerPhone = msg.from; // acts as sessionId
+          const incomingText = msg.text.body;
+
+          console.log(`Received WhatsApp msg from ${customerPhone}: ${incomingText}`);
+
+          // A. Pass through core AI chat logic
+          const chatResult = await processChatLogic(customerPhone, incomingText);
+
+          // B. Send AI reply back to WhatsApp
+          if (chatResult.reply) {
+            await sendWhatsAppMessage(customerPhone, chatResult.reply);
+          }
+
+          // C. If checkout conditions met, generate UPI link automatically
+          if (chatResult.readyToCheckout && chatResult.cart?.length > 0) {
+            const checkoutResult = await processCheckoutLogic(
+              customerPhone,
+              chatResult.customerDetails
+            );
+            
+            const upiMessage = `🎉 *Order Confirmed! (Total: ₹${checkoutResult.total})*\n\nTap below to pay via GPay / PhonePe / Paytm:\n${checkoutResult.upiUrl}`;
+            await sendWhatsAppMessage(customerPhone, upiMessage);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("WhatsApp Webhook processing error:", err.message);
   }
 });
 
