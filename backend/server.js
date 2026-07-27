@@ -85,10 +85,7 @@ async function callGeminiWithFallback(body) {
 
     while (retryCount <= maxRetries) {
       try {
-        console.log(
-          `Trying model: ${model}` +
-            (retryCount > 0 ? ` (retry ${retryCount})` : "")
-        );
+        console.log(`Trying model: ${model}` + (retryCount > 0 ? ` (retry ${retryCount})` : ""));
 
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
         const resp = await fetch(url, {
@@ -100,9 +97,7 @@ async function callGeminiWithFallback(body) {
         if (resp.status === 429) {
           if (retryCount < maxRetries) {
             const waitTime = Math.pow(2, retryCount) * 5000;
-            console.log(
-              `  -> Rate-limited (429). Waiting ${waitTime / 1000}s before retry...`
-            );
+            console.log(`  -> Rate-limited (429). Waiting ${waitTime / 1000}s before retry...`);
             await new Promise((resolve) => setTimeout(resolve, waitTime));
             retryCount++;
             continue;
@@ -147,7 +142,8 @@ async function processChatLogic(sessionId, message) {
     .map((m) => `${m.name} (ID: ${m.id}) - ₹${m.price} - ${m.description}`)
     .join("\n");
 
-  const systemPrompt = `You are a polite food ordering assistant for "QuickBite".
+  // UPDATED SYSTEM PROMPT: Forces AI to ask one by one
+  const systemPrompt = `You are a polite, modern food ordering assistant for "QuickBite". Keep your tone friendly, brief, and slightly casual.
 Available Dynamic Menu:
 ${menuContext}
 
@@ -155,11 +151,12 @@ Current Cart: ${cart.length ? JSON.stringify(cart) : "empty"}
 
 Task Instructions:
 1. Help the user add/remove menu items.
-2. Politely collect four mandatory delivery details from the customer before completing checkout:
+2. Collect four mandatory delivery details from the customer before completing checkout:
    - Full Name
    - Phone Number
    - Delivery Address
    - Email Address
+   CRITICAL RULE: You MUST ask for these missing details STRICTLY ONE AT A TIME. Wait for the user to answer the current question before asking for the next missing detail. Never ask for multiple missing details in a single message.
 3. Always reply strictly with a single valid JSON object in this exact schema (no markdown code blocks, no extra prose):
 {
   "reply": "<Friendly assistant message to the customer>",
@@ -277,7 +274,7 @@ async function processCheckoutLogic(sessionId, customerDetails) {
 
 // ---------------- ENDPOINTS ----------------
 
-// 1. Fetch Dynamic Menu from Supabase DB
+// 1. Fetch Dynamic Menu
 app.get("/api/menu", async (req, res) => {
   try {
     const { data: menu, error } = await supabase
@@ -291,7 +288,7 @@ app.get("/api/menu", async (req, res) => {
   }
 });
 
-// 2. Chat Endpoint (For Frontend Web App)
+// 2. Chat Endpoint 
 app.post("/api/chat", async (req, res) => {
   try {
     const { sessionId, message } = req.body;
@@ -308,7 +305,7 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// 3. Checkout Endpoint (For Frontend Web App)
+// 3. Checkout Endpoint 
 app.post("/api/checkout", async (req, res) => {
   try {
     const { sessionId, customerDetails } = req.body;
@@ -319,7 +316,7 @@ app.post("/api/checkout", async (req, res) => {
   }
 });
 
-// 4. Confirm Payment & Trigger Email
+// 4. Confirm Payment 
 app.post("/api/confirm-payment", async (req, res) => {
   try {
     const { orderId } = req.body;
@@ -392,7 +389,7 @@ app.get("/webhook", (req, res) => {
 
 // 6. Receive Incoming WhatsApp Messages
 app.post("/webhook", async (req, res) => {
-  res.sendStatus(200); // Send 200 OK to Meta immediately
+  res.sendStatus(200);
 
   try {
     const body = req.body;
@@ -402,20 +399,17 @@ app.post("/webhook", async (req, res) => {
       for (const change of entry.changes || []) {
         const msg = change.value?.messages?.[0];
         if (msg && msg.type === "text") {
-          const customerPhone = msg.from; // acts as sessionId
+          const customerPhone = msg.from; 
           const incomingText = msg.text.body;
 
           console.log(`Received WhatsApp msg from ${customerPhone}: ${incomingText}`);
 
-          // A. Pass through core AI chat logic
           const chatResult = await processChatLogic(customerPhone, incomingText);
 
-          // B. Send AI reply back to WhatsApp
           if (chatResult.reply) {
             await sendWhatsAppMessage(customerPhone, chatResult.reply);
           }
 
-          // C. If checkout conditions met, generate UPI link automatically
           if (chatResult.readyToCheckout && chatResult.cart?.length > 0) {
             const checkoutResult = await processCheckoutLogic(
               customerPhone,
