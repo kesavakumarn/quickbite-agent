@@ -10,7 +10,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const UPI_ID = process.env.UPI_ID || "kesavakumarn-2@okicici";
+const UPI_ID = process.env.UPI_ID || "9966392629@ybl";
 
 // WhatsApp Secrets
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
