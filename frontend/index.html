@@ -133,7 +133,8 @@
       border-radius: 6px;
       font-weight: bold;
       margin-top: 10px;
-      cursor: pointer;
+      cursor: not-allowed;
+      opacity: 0.5;
     }
     .stamp {
       display: none;
@@ -161,7 +162,7 @@
   <div class="chat-panel">
     <div class="messages" id="messages"></div>
     <div class="composer">
-      <input id="input" type="text" placeholder="e.g. Add 2 Margherita pizzas and my name is Rahul..." autocomplete="off"/>
+      <input id="input" type="text" placeholder="e.g. Add 2 Margherita pizzas..." autocomplete="off"/>
       <button id="send">Send</button>
     </div>
   </div>
@@ -180,7 +181,8 @@
         <p style="margin:0 0 8px 0; font-weight:bold;">Scan or Tap to Pay with Google Pay / UPI</p>
         <img id="qr-img" src="" alt="UPI QR" style="width:160px; height:160px; margin:auto;" />
         <a id="gpay-link" href="#" class="gpay-btn">Pay via Google Pay / UPI</a>
-        <button id="confirm-pay-btn" class="confirm-btn">I Have Completed Payment</button>
+        <!-- Disabled dummy button per request -->
+        <button id="confirm-pay-btn" class="confirm-btn" disabled>Payment Verification Pending...</button>
       </div>
     </div>
   </div>
@@ -198,11 +200,10 @@
   const paymentSection = document.getElementById("payment-section");
   const qrImg = document.getElementById("qr-img");
   const gpayLink = document.getElementById("gpay-link");
-  const confirmPayBtn = document.getElementById("confirm-pay-btn");
-  const stamp = document.getElementById("stamp");
 
   let currentOrder = null;
   let latestCustomerDetails = {};
+  let isFirstMessage = true; // Track first message to inject step-by-step instructions
 
   function addMessage(text, who) {
     const div = document.createElement("div");
@@ -230,15 +231,24 @@
   async function sendMessage() {
     const text = inputEl.value.trim();
     if (!text) return;
+    
+    // Display the clean message to the user
     addMessage(text, "user");
     inputEl.value = "";
     sendBtn.disabled = true;
+
+    // Inject a hidden prompt on the very first message to force the AI to ask step-by-step
+    let backendPayload = text;
+    if (isFirstMessage) {
+      backendPayload += "\n\n[System Instruction: For the rest of this conversation, ask for my details step-by-step. First ask for my order, then my Name, then my Mobile, then my Email, and finally my Address with Zipcode. Do NOT ask for them all at once.]";
+      isFirstMessage = false;
+    }
 
     try {
       const res = await fetch(`${BACKEND_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, message: text })
+        body: JSON.stringify({ sessionId, message: backendPayload })
       });
       const data = await res.json();
       if (data.error) {
@@ -279,37 +289,11 @@
     }
   }
 
-  confirmPayBtn.onclick = async () => {
-    if (!currentOrder) return;
-    confirmPayBtn.disabled = true;
-    confirmPayBtn.textContent = "Verifying...";
-
-    try {
-      const res = await fetch(`${BACKEND_URL}/api/confirm-payment`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderId: currentOrder.orderId })
-      });
-      const data = await res.json();
-      if (data.status === "SUCCESS") {
-        stamp.style.display = "block";
-        paymentSection.style.display = "none";
-        addMessage("🎉 Payment confirmed! Order invoice sent to your email address.", "bot");
-      } else {
-        alert("Failed to confirm payment.");
-      }
-    } catch (e) {
-      alert("Error confirming payment: " + e.message);
-    } finally {
-      confirmPayBtn.disabled = false;
-      confirmPayBtn.textContent = "I Have Completed Payment";
-    }
-  };
-
   sendBtn.onclick = sendMessage;
   inputEl.onkeydown = (e) => { if (e.key === "Enter") sendMessage(); };
 
-  addMessage("Hello! What would you like to order today? (Tell me what food you want along with your Name, Phone, Delivery Address, and Email)", "bot");
+  // Updated initial prompt so the user isn't immediately overwhelmed
+  addMessage("Hello! What would you like to order today?", "bot");
 </script>
 </body>
 </html>
