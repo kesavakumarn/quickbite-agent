@@ -12,12 +12,12 @@ const PORT = process.env.PORT || 8080;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const UPI_ID = process.env.UPI_ID || "9966392629@ybl";
 
-// Guaranteed Free-Tier Models
+// Guaranteed working models. If one fails or hangs, it moves to the next.
 const GEMINI_MODELS = [
-  "gemini-3.5-flash",
-  "gemini-3.5-flash-lite",
+  "gemini-2.0-flash",
   "gemini-2.5-flash",
-  "gemini-2.5-pro"
+  "gemini-1.5-flash",
+  "gemini-pro"
 ];
 
 // Initialize Supabase Client
@@ -47,7 +47,7 @@ function calculateTotal(cart) {
   return cart.reduce((sum, item) => sum + item.price * item.qty, 0);
 }
 
-// Helper: Call Gemini with model fallbacks AND AGGRESSIVE LOGGING
+// Helper: Call Gemini with Timeout and Fallbacks
 async function callGeminiWithFallback(body) {
   if (!GEMINI_API_KEY) {
     console.error("[GEMINI ERROR] Missing GEMINI_API_KEY environment variable.");
@@ -63,16 +63,23 @@ async function callGeminiWithFallback(body) {
         console.log(`[GEMINI] Attempting model: ${model} (Retry: ${retryCount})`);
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
         
+        // ANTI-FREEZE: 8-second timeout for the API call
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
+
         const resp = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
+          signal: controller.signal
         });
+        
+        clearTimeout(timeoutId); // Clear timeout if fetch succeeds
 
         if (resp.status === 429) {
           console.warn(`[GEMINI] Rate limited (429) on ${model}. Waiting to retry...`);
           if (retryCount < 2) {
-            await new Promise((res) => setTimeout(res, Math.pow(2, retryCount) * 5000));
+            await new Promise((res) => setTimeout(res, Math.pow(2, retryCount) * 4000));
             retryCount++;
             continue;
           } else {
@@ -90,13 +97,18 @@ async function callGeminiWithFallback(body) {
         console.log(`[GEMINI] Success with model: ${model}`);
         return await resp.json();
       } catch (err) {
-        console.error(`[GEMINI ERROR] Model ${model} failed: ${err.message}`);
-        lastError = err.message;
+        if (err.name === 'AbortError') {
+          console.error(`[GEMINI ERROR] Model ${model} TIMED OUT (Took longer than 8s)`);
+          lastError = `Model ${model} timed out`;
+        } else {
+          console.error(`[GEMINI ERROR] Model ${model} failed: ${err.message}`);
+          lastError = err.message;
+        }
         break; // Move to the next model in the list
       }
     }
   }
-  console.error("[GEMINI FATAL] All models failed.");
+  console.error("[GEMINI FATAL] All models failed or timed out.");
   throw new Error(`All Gemini models failed. Last error: ${lastError}`);
 }
 
@@ -163,7 +175,6 @@ Task Instructions:
 
   let parsed;
   try {
-    // Bulletproof JSON parsing logic to strip out garbage text/brackets
     const firstBrace = cleanText.indexOf('{');
     const lastBrace = cleanText.lastIndexOf('}');
     
@@ -176,7 +187,6 @@ Task Instructions:
     console.log("[PARSER] Successfully parsed Gemini JSON response.");
   } catch (err) {
     console.error("[PARSER ERROR] Failed to parse JSON. Raw output:", rawText);
-    // Friendly fallback message so the user never sees raw JSON string
     parsed = { 
       reply: "I'm so sorry, my system just had a tiny hiccup! Could you repeat that?", 
       cart_actions: [], 
