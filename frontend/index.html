@@ -9,9 +9,9 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --primary: #FF5A5F; /* Appetizing Coral/Red */
+      --primary: #FF5A5F; 
       --primary-hover: #E0484D;
-      --bg: #F3F4F6; /* Soft App Gray */
+      --bg: #F3F4F6; 
       --surface: #FFFFFF;
       --text-main: #111827;
       --text-muted: #6B7280;
@@ -31,7 +31,6 @@
       -webkit-font-smoothing: antialiased;
     }
     
-    /* App Header */
     header {
       background: var(--surface);
       padding: 16px 24px;
@@ -63,7 +62,6 @@
       border-radius: 6px;
     }
     
-    /* Main Layout */
     .layout {
       display: flex;
       flex-direction: row;
@@ -82,7 +80,6 @@
       border: 1px solid var(--border);
     }
 
-    /* Chat Area */
     .chat-section {
       flex: 1;
       display: flex;
@@ -177,7 +174,6 @@
       cursor: not-allowed;
     }
     
-    /* Cart Area */
     .cart-section {
       width: 350px;
       flex-shrink: 0;
@@ -285,7 +281,6 @@
       margin-bottom: 16px;
     }
 
-    /* Mobile Adjustments */
     @media (max-width: 820px) {
       .layout { 
         flex-direction: column; 
@@ -293,12 +288,10 @@
         height: auto; 
         gap: 16px;
       }
-      
       .chat-section {
         height: 60vh; 
         min-height: 400px; 
       }
-      
       .cart-section { width: 100%; overflow-y: visible; }
       header { padding: 12px 16px; }
       .sub { display: none; }
@@ -313,7 +306,6 @@
 </header>
 
 <div class="layout">
-  <!-- Chat Section -->
   <div class="card chat-section">
     <div class="messages" id="messages"></div>
     <div class="composer">
@@ -322,7 +314,6 @@
     </div>
   </div>
 
-  <!-- Cart Section -->
   <div class="card cart-section">
     <div class="stamp" id="stamp">✓ ORDER CONFIRMED</div>
     <h2>Order Summary</h2>
@@ -333,7 +324,6 @@
       <span id="total">₹0</span>
     </div>
 
-    <!-- Hidden until checkout -->
     <div id="payment-section">
       <p>Scan to pay and confirm order</p>
       <div class="qr-container">
