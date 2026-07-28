@@ -12,17 +12,11 @@ const PORT = process.env.PORT || 8080;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const UPI_ID = process.env.UPI_ID || "9966392629@ybl";
 
-// WhatsApp Secrets
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-
-// List of models to try in order of preference / generosity
+// List of models to try (Using strictly stable versions to prevent 404 crashes)
 const GEMINI_MODELS = [
-  "gemini-2.5-flash",
-  "gemini-2.5-pro",
-  "gemini-2.0-flash",
   "gemini-1.5-flash",
+  "gemini-1.5-pro",
+  "gemini-pro"
 ];
 
 // Initialize Supabase Client
@@ -36,7 +30,7 @@ const resend = new Resend(process.env.RESEND_API_KEY || "");
 
 // In-memory sessions (MEMORY BANKS)
 const carts = new Map();
-const customerSessions = new Map(); // <--- NEW: Stores Name/Phone between messages
+const customerSessions = new Map();
 
 function getCart(sessionId) {
   if (!carts.has(sessionId)) carts.set(sessionId, []);
@@ -52,38 +46,22 @@ function calculateTotal(cart) {
   return cart.reduce((sum, item) => sum + item.price * item.qty, 0);
 }
 
-// Helper: Send message back to WhatsApp
-async function sendWhatsAppMessage(toPhone, textMessage) {
-  if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_ID) return;
-  const url = `https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_ID}/messages`;
-  try {
-    await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to: toPhone,
-        text: { body: textMessage },
-      }),
-    });
-  } catch (err) {
-    console.error("Error sending WhatsApp message:", err.message);
-  }
-}
-
-// Helper: Call Gemini with model fallbacks
+// Helper: Call Gemini with model fallbacks AND AGGRESSIVE LOGGING
 async function callGeminiWithFallback(body) {
-  if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY.");
+  if (!GEMINI_API_KEY) {
+    console.error("[GEMINI ERROR] Missing GEMINI_API_KEY environment variable.");
+    throw new Error("Missing GEMINI_API_KEY.");
+  }
+  
   let lastError = null;
 
   for (const model of GEMINI_MODELS) {
     let retryCount = 0;
     while (retryCount <= 2) {
       try {
+        console.log(`[GEMINI] Attempting model: ${model} (Retry: ${retryCount})`);
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+        
         const resp = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -91,6 +69,7 @@ async function callGeminiWithFallback(body) {
         });
 
         if (resp.status === 429) {
+          console.warn(`[GEMINI] Rate limited (429) on ${model}. Waiting to retry...`);
           if (retryCount < 2) {
             await new Promise((res) => setTimeout(res, Math.pow(2, retryCount) * 5000));
             retryCount++;
@@ -101,28 +80,44 @@ async function callGeminiWithFallback(body) {
           }
         }
 
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        if (!resp.ok) {
+          const errText = await resp.text();
+          console.error(`[GEMINI ERROR] HTTP ${resp.status} from ${model}: ${errText}`);
+          throw new Error(`HTTP ${resp.status}`);
+        }
+        
+        console.log(`[GEMINI] Success with model: ${model}`);
         return await resp.json();
       } catch (err) {
+        console.error(`[GEMINI ERROR] Model ${model} failed: ${err.message}`);
         lastError = err.message;
-        break;
+        break; // Move to the next model in the list
       }
     }
   }
+  console.error("[GEMINI FATAL] All models failed.");
   throw new Error(`All Gemini models failed. Last error: ${lastError}`);
 }
 
-// ---------------- REUSABLE CORE LOGIC ----------------
-
 // Core Chat Processor
 async function processChatLogic(sessionId, message) {
-  const cart = getCart(sessionId);
-  const knownDetails = getCustomerDetails(sessionId); // <--- Retrieve known details
+  console.log(`\n--- NEW CHAT REQUEST --- Session: ${sessionId}`);
+  console.log(`User says: "${message}"`);
 
-  const { data: menuItems } = await supabase
+  const cart = getCart(sessionId);
+  const knownDetails = getCustomerDetails(sessionId);
+
+  console.log("[SUPABASE] Fetching menu...");
+  const { data: menuItems, error: menuError } = await supabase
     .from("menu")
     .select("*")
     .eq("is_available", true);
+
+  if (menuError) {
+    console.error("[SUPABASE ERROR] Failed to fetch menu:", menuError);
+    throw new Error("Database failed to load menu.");
+  }
+  console.log(`[SUPABASE] Successfully loaded ${menuItems?.length || 0} menu items.`);
 
   const menuContext = (menuItems || [])
     .map((m) => `${m.name} (ID: ${m.id}) - ₹${m.price} - ${m.description}`)
@@ -139,7 +134,7 @@ Task Instructions:
 1. Help the user add/remove menu items.
 2. Collect four mandatory delivery details: Name, Phone, Email, Address.
    CRITICAL RULE: Check the "Details Already Collected" JSON above. DO NOT ask for any detail that is already filled out. Only ask for the MISSING details, STRICTLY ONE AT A TIME. Wait for the user to answer before asking for the next one.
-3. Always reply strictly with a single valid JSON object in this exact schema:
+3. Always reply strictly with a single valid JSON object in this exact schema (no markdown, no backticks):
 {
   "reply": "<Friendly assistant message to the customer>",
   "cart_actions": [
@@ -161,15 +156,20 @@ Task Instructions:
 
   const data = await callGeminiWithFallback(body);
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+  
+  // Safely strip markdown if Gemini ignores instructions
+  const cleanText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
 
   let parsed;
   try {
-    parsed = JSON.parse(rawText);
-  } catch {
-    parsed = { reply: rawText, cart_actions: [], customer_details: {} };
+    parsed = JSON.parse(cleanText);
+    console.log("[PARSER] Successfully parsed Gemini JSON response.");
+  } catch (err) {
+    console.error("[PARSER ERROR] Failed to parse Gemini response as JSON. Raw output:", rawText);
+    parsed = { reply: cleanText, cart_actions: [], customer_details: {} };
   }
 
-  // Handle Cart
+  // Handle Cart Updates
   for (const action of parsed.cart_actions || []) {
     if (action.action === "clear") {
       cart.length = 0;
@@ -192,7 +192,7 @@ Task Instructions:
     }
   }
 
-  // <--- NEW: Merge newly extracted details without overwriting existing ones with empty strings
+  // Update known details
   if (parsed.customer_details) {
     Object.keys(parsed.customer_details).forEach(key => {
       if (parsed.customer_details[key] && parsed.customer_details[key].trim() !== "") {
@@ -201,13 +201,14 @@ Task Instructions:
     });
   }
 
-  // <--- NEW: Calculate checkout readiness securely on the backend
   const isReady = 
     cart.length > 0 && 
     !!knownDetails.name && 
     !!knownDetails.phone && 
     !!knownDetails.email && 
     !!knownDetails.address;
+
+  console.log(`[STATE] Cart Total: ₹${calculateTotal(cart)} | Ready for checkout: ${isReady}`);
 
   return {
     reply: parsed.reply || "How can I help with your order?",
@@ -220,11 +221,13 @@ Task Instructions:
 
 // Core Checkout Processor
 async function processCheckoutLogic(sessionId, customerDetails) {
+  console.log(`[CHECKOUT] Processing checkout for session: ${sessionId}`);
   const cart = getCart(sessionId);
   if (!cart.length) throw new Error("Cart is empty");
 
   const total = calculateTotal(cart);
 
+  console.log("[SUPABASE] Saving order to database...");
   const { data: order, error } = await supabase
     .from("orders")
     .insert([{
@@ -239,12 +242,16 @@ async function processCheckoutLogic(sessionId, customerDetails) {
     }])
     .select().single();
 
-  if (error) throw error;
+  if (error) {
+    console.error("[SUPABASE ERROR] Failed to save order:", error);
+    throw error;
+  }
 
   const shortOrderId = order.id.slice(0, 8);
   const upiUrl = `upi://pay?pa=${UPI_ID}&pn=QuickBite&tr=${order.id}&am=${total}&cu=INR&tn=Order_${shortOrderId}`;
   const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(upiUrl)}`;
 
+  console.log(`[CHECKOUT] Successfully generated payment links for Order ${shortOrderId}`);
   return { orderId: order.id, total, upiUrl, qrCodeUrl, upiId: UPI_ID };
 }
 
@@ -267,7 +274,9 @@ app.post("/api/chat", async (req, res) => {
     const result = await processChatLogic(sessionId, message);
     res.json(result);
   } catch (err) {
-    res.status(502).json({ error: "Gemini API error", detail: err.message });
+    console.error("[API/CHAT ERROR] Returning 502 to frontend:", err.message);
+    // Returning 200 with an error object prevents the frontend from throwing hard network exceptions
+    res.status(200).json({ error: "Gemini API error", detail: err.message });
   }
 });
 
@@ -277,7 +286,8 @@ app.post("/api/checkout", async (req, res) => {
     const result = await processCheckoutLogic(sessionId, customerDetails);
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: "Checkout error", detail: err.message });
+    console.error("[API/CHECKOUT ERROR] Returning 500 to frontend:", err.message);
+    res.status(200).json({ error: "Checkout error", detail: err.message });
   }
 });
 
@@ -309,45 +319,11 @@ app.post("/api/confirm-payment", async (req, res) => {
       });
     }
 
-    // <--- NEW: Clear memory upon successful payment
     carts.delete(order.session_id);
     customerSessions.delete(order.session_id);
-
     res.json({ status: "SUCCESS", message: "Payment confirmed.", order });
   } catch (err) {
-    res.status(500).json({ error: "Confirmation failed", detail: err.message });
-  }
-});
-
-// WhatsApp Webhook
-app.get("/webhook", (req, res) => {
-  if (req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === VERIFY_TOKEN) {
-    res.status(200).send(req.query["hub.challenge"]);
-  } else res.sendStatus(403);
-});
-
-app.post("/webhook", async (req, res) => {
-  res.sendStatus(200);
-  try {
-    const body = req.body;
-    if (body.object !== "whatsapp_business_account") return;
-    for (const entry of body.entry || []) {
-      for (const change of entry.changes || []) {
-        const msg = change.value?.messages?.[0];
-        if (msg && msg.type === "text") {
-          const customerPhone = msg.from; 
-          const chatResult = await processChatLogic(customerPhone, msg.text.body);
-          if (chatResult.reply) await sendWhatsAppMessage(customerPhone, chatResult.reply);
-          if (chatResult.readyToCheckout && chatResult.cart?.length > 0) {
-            const checkoutResult = await processCheckoutLogic(customerPhone, chatResult.customerDetails);
-            const upiMessage = `🎉 *Order Confirmed! (Total: ₹${checkoutResult.total})*\n\nTap below to pay:\n${checkoutResult.upiUrl}`;
-            await sendWhatsAppMessage(customerPhone, upiMessage);
-          }
-        }
-      }
-    }
-  } catch (err) {
-    console.error("WhatsApp error:", err.message);
+    res.status(200).json({ error: "Confirmation failed", detail: err.message });
   }
 });
 
