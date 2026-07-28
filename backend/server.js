@@ -12,12 +12,12 @@ const PORT = process.env.PORT || 8080;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const UPI_ID = process.env.UPI_ID || "9966392629@ybl";
 
-// Guaranteed working models. If one fails or hangs, it moves to the next.
+// Guaranteed active Free-Tier Models as of July 2026
 const GEMINI_MODELS = [
-  "gemini-2.0-flash",
-  "gemini-2.5-flash",
-  "gemini-1.5-flash",
-  "gemini-pro"
+  "gemini-3.5-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite"
 ];
 
 // Initialize Supabase Client
@@ -74,7 +74,7 @@ async function callGeminiWithFallback(body) {
           signal: controller.signal
         });
         
-        clearTimeout(timeoutId); // Clear timeout if fetch succeeds
+        clearTimeout(timeoutId);
 
         if (resp.status === 429) {
           console.warn(`[GEMINI] Rate limited (429) on ${model}. Waiting to retry...`);
