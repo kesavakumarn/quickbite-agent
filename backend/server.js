@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 8080;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const UPI_ID = process.env.UPI_ID || "9966392629@ybl";
 
-// Guaranteed Free-Tier Models as of July 2026
+// Guaranteed Free-Tier Models
 const GEMINI_MODELS = [
   "gemini-3.5-flash",
   "gemini-3.5-flash-lite",
@@ -163,11 +163,25 @@ Task Instructions:
 
   let parsed;
   try {
-    parsed = JSON.parse(cleanText);
+    // Bulletproof JSON parsing logic to strip out garbage text/brackets
+    const firstBrace = cleanText.indexOf('{');
+    const lastBrace = cleanText.lastIndexOf('}');
+    
+    if (firstBrace !== -1 && lastBrace !== -1) {
+      const jsonStr = cleanText.substring(firstBrace, lastBrace + 1);
+      parsed = JSON.parse(jsonStr);
+    } else {
+      parsed = JSON.parse(cleanText);
+    }
     console.log("[PARSER] Successfully parsed Gemini JSON response.");
   } catch (err) {
-    console.error("[PARSER ERROR] Failed to parse Gemini response as JSON. Raw output:", rawText);
-    parsed = { reply: cleanText, cart_actions: [], customer_details: {} };
+    console.error("[PARSER ERROR] Failed to parse JSON. Raw output:", rawText);
+    // Friendly fallback message so the user never sees raw JSON string
+    parsed = { 
+      reply: "I'm so sorry, my system just had a tiny hiccup! Could you repeat that?", 
+      cart_actions: [], 
+      customer_details: {} 
+    };
   }
 
   // Handle Cart Updates
@@ -275,7 +289,7 @@ app.post("/api/chat", async (req, res) => {
     const result = await processChatLogic(sessionId, message);
     res.json(result);
   } catch (err) {
-    console.error("[API/CHAT ERROR] Returning 502 to frontend:", err.message);
+    console.error("[API/CHAT ERROR] Returning 200 to frontend with error:", err.message);
     res.status(200).json({ error: "Gemini API error", detail: err.message });
   }
 });
@@ -286,7 +300,7 @@ app.post("/api/checkout", async (req, res) => {
     const result = await processCheckoutLogic(sessionId, customerDetails);
     res.json(result);
   } catch (err) {
-    console.error("[API/CHECKOUT ERROR] Returning 500 to frontend:", err.message);
+    console.error("[API/CHECKOUT ERROR] Returning 200 to frontend with error:", err.message);
     res.status(200).json({ error: "Checkout error", detail: err.message });
   }
 });
