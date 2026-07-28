@@ -12,11 +12,12 @@ const PORT = process.env.PORT || 8080;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const UPI_ID = process.env.UPI_ID || "9966392629@ybl";
 
-// List of models to try (Using strictly stable versions to prevent 404 crashes)
+// Guaranteed Free-Tier Models as of July 2026
 const GEMINI_MODELS = [
-  "gemini-1.5-flash",
-  "gemini-1.5-pro",
-  "gemini-pro"
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-2.5-pro"
 ];
 
 // Initialize Supabase Client
@@ -192,7 +193,7 @@ Task Instructions:
     }
   }
 
-  // Update known details
+  // Update known details without overwriting existing data
   if (parsed.customer_details) {
     Object.keys(parsed.customer_details).forEach(key => {
       if (parsed.customer_details[key] && parsed.customer_details[key].trim() !== "") {
@@ -275,7 +276,6 @@ app.post("/api/chat", async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("[API/CHAT ERROR] Returning 502 to frontend:", err.message);
-    // Returning 200 with an error object prevents the frontend from throwing hard network exceptions
     res.status(200).json({ error: "Gemini API error", detail: err.message });
   }
 });
