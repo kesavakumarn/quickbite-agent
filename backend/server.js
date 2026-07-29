@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 8080;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const UPI_ID = process.env.UPI_ID || "9966392629@ybl";
 
-// Guaranteed active Free-Tier Models as of July 2026
+// Guaranteed active Free-Tier Models
 const GEMINI_MODELS = [
   "gemini-3.5-flash",
   "gemini-3.6-flash",
@@ -50,7 +50,7 @@ function calculateTotal(cart) {
 // Helper: Call Gemini with Timeout and Fallbacks
 async function callGeminiWithFallback(body) {
   if (!GEMINI_API_KEY) {
-    console.error("[GEMINI ERROR] Missing GEMINI_API_KEY environment variable.");
+    console.error("[GEMINI ERROR] Missing GEMINI_API_KEY.");
     throw new Error("Missing GEMINI_API_KEY.");
   }
   
@@ -63,7 +63,6 @@ async function callGeminiWithFallback(body) {
         console.log(`[GEMINI] Attempting model: ${model} (Retry: ${retryCount})`);
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
         
-        // ANTI-FREEZE: 8-second timeout for the API call
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 8000);
 
@@ -98,13 +97,13 @@ async function callGeminiWithFallback(body) {
         return await resp.json();
       } catch (err) {
         if (err.name === 'AbortError') {
-          console.error(`[GEMINI ERROR] Model ${model} TIMED OUT (Took longer than 8s)`);
+          console.error(`[GEMINI ERROR] Model ${model} TIMED OUT`);
           lastError = `Model ${model} timed out`;
         } else {
           console.error(`[GEMINI ERROR] Model ${model} failed: ${err.message}`);
           lastError = err.message;
         }
-        break; // Move to the next model in the list
+        break; 
       }
     }
   }
@@ -115,22 +114,15 @@ async function callGeminiWithFallback(body) {
 // Core Chat Processor
 async function processChatLogic(sessionId, message) {
   console.log(`\n--- NEW CHAT REQUEST --- Session: ${sessionId}`);
-  console.log(`User says: "${message}"`);
-
   const cart = getCart(sessionId);
   const knownDetails = getCustomerDetails(sessionId);
 
-  console.log("[SUPABASE] Fetching menu...");
   const { data: menuItems, error: menuError } = await supabase
     .from("menu")
     .select("*")
     .eq("is_available", true);
 
-  if (menuError) {
-    console.error("[SUPABASE ERROR] Failed to fetch menu:", menuError);
-    throw new Error("Database failed to load menu.");
-  }
-  console.log(`[SUPABASE] Successfully loaded ${menuItems?.length || 0} menu items.`);
+  if (menuError) throw new Error("Database failed to load menu.");
 
   const menuContext = (menuItems || [])
     .map((m) => `${m.name} (ID: ${m.id}) - ₹${m.price} - ${m.description}`)
@@ -169,40 +161,27 @@ Task Instructions:
 
   const data = await callGeminiWithFallback(body);
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-  
-  // Safely strip markdown if Gemini ignores instructions
   const cleanText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
 
   let parsed;
   try {
     const firstBrace = cleanText.indexOf('{');
     const lastBrace = cleanText.lastIndexOf('}');
-    
     if (firstBrace !== -1 && lastBrace !== -1) {
-      const jsonStr = cleanText.substring(firstBrace, lastBrace + 1);
-      parsed = JSON.parse(jsonStr);
+      parsed = JSON.parse(cleanText.substring(firstBrace, lastBrace + 1));
     } else {
       parsed = JSON.parse(cleanText);
     }
-    console.log("[PARSER] Successfully parsed Gemini JSON response.");
   } catch (err) {
-    console.error("[PARSER ERROR] Failed to parse JSON. Raw output:", rawText);
-    parsed = { 
-      reply: "I'm so sorry, my system just had a tiny hiccup! Could you repeat that?", 
-      cart_actions: [], 
-      customer_details: {} 
-    };
+    parsed = { reply: "I'm so sorry, my system just had a tiny hiccup! Could you repeat that?", cart_actions: [], customer_details: {} };
   }
 
-  // Handle Cart Updates
   for (const action of parsed.cart_actions || []) {
     if (action.action === "clear") {
       cart.length = 0;
       continue;
     }
-    const itemMatch = (menuItems || []).find((m) =>
-      m.name.toLowerCase().includes((action.item_name || "").toLowerCase())
-    );
+    const itemMatch = (menuItems || []).find((m) => m.name.toLowerCase().includes((action.item_name || "").toLowerCase()));
     if (!itemMatch) continue;
 
     const qty = Math.max(1, parseInt(action.quantity, 10) || 1);
@@ -217,7 +196,6 @@ Task Instructions:
     }
   }
 
-  // Update known details without overwriting existing data
   if (parsed.customer_details) {
     Object.keys(parsed.customer_details).forEach(key => {
       if (parsed.customer_details[key] && parsed.customer_details[key].trim() !== "") {
@@ -226,14 +204,7 @@ Task Instructions:
     });
   }
 
-  const isReady = 
-    cart.length > 0 && 
-    !!knownDetails.name && 
-    !!knownDetails.phone && 
-    !!knownDetails.email && 
-    !!knownDetails.address;
-
-  console.log(`[STATE] Cart Total: ₹${calculateTotal(cart)} | Ready for checkout: ${isReady}`);
+  const isReady = cart.length > 0 && !!knownDetails.name && !!knownDetails.phone && !!knownDetails.email && !!knownDetails.address;
 
   return {
     reply: parsed.reply || "How can I help with your order?",
@@ -244,15 +215,12 @@ Task Instructions:
   };
 }
 
-// Core Checkout Processor
 async function processCheckoutLogic(sessionId, customerDetails) {
-  console.log(`[CHECKOUT] Processing checkout for session: ${sessionId}`);
   const cart = getCart(sessionId);
   if (!cart.length) throw new Error("Cart is empty");
 
   const total = calculateTotal(cart);
 
-  console.log("[SUPABASE] Saving order to database...");
   const { data: order, error } = await supabase
     .from("orders")
     .insert([{
@@ -267,16 +235,12 @@ async function processCheckoutLogic(sessionId, customerDetails) {
     }])
     .select().single();
 
-  if (error) {
-    console.error("[SUPABASE ERROR] Failed to save order:", error);
-    throw error;
-  }
+  if (error) throw error;
 
   const shortOrderId = order.id.slice(0, 8);
   const upiUrl = `upi://pay?pa=${UPI_ID}&pn=QuickBite&tr=${order.id}&am=${total}&cu=INR&tn=Order_${shortOrderId}`;
   const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(upiUrl)}`;
 
-  console.log(`[CHECKOUT] Successfully generated payment links for Order ${shortOrderId}`);
   return { orderId: order.id, total, upiUrl, qrCodeUrl, upiId: UPI_ID };
 }
 
@@ -299,7 +263,6 @@ app.post("/api/chat", async (req, res) => {
     const result = await processChatLogic(sessionId, message);
     res.json(result);
   } catch (err) {
-    console.error("[API/CHAT ERROR] Returning 200 to frontend with error:", err.message);
     res.status(200).json({ error: "Gemini API error", detail: err.message });
   }
 });
@@ -310,7 +273,6 @@ app.post("/api/checkout", async (req, res) => {
     const result = await processCheckoutLogic(sessionId, customerDetails);
     res.json(result);
   } catch (err) {
-    console.error("[API/CHECKOUT ERROR] Returning 200 to frontend with error:", err.message);
     res.status(200).json({ error: "Checkout error", detail: err.message });
   }
 });
@@ -318,35 +280,46 @@ app.post("/api/checkout", async (req, res) => {
 app.post("/api/confirm-payment", async (req, res) => {
   try {
     const { orderId } = req.body;
+    console.log(`[PAYMENT] Confirming payment for order: ${orderId}`);
+
     const { data: order, error } = await supabase
       .from("orders").update({ status: "PAID_CONFIRMED" }).eq("id", orderId).select().single();
 
     if (error) throw error;
 
+    // SAFETY NET: Wrap email sending in try/catch so free-tier Resend limits don't crash the payment process
     if (order.customer_email && order.customer_email.includes("@")) {
-      const itemsList = (order.items || []).map(i => `<li>${i.qty}x <strong>${i.name}</strong> - ₹${i.price * i.qty}</li>`).join("");
-      await resend.emails.send({
-        from: process.env.SENDER_EMAIL || "onboarding@resend.dev",
-        to: order.customer_email,
-        subject: `Order Confirmed - QuickBite #${order.id.slice(0, 8)}`,
-        html: `<div style="font-family: sans-serif; max-width: 600px; margin: auto; border: 1px solid #eee; padding: 20px; border-radius: 8px;">
-            <h2 style="color: #ffb100;">Order Confirmed! 🎉</h2>
-            <p>Hi <strong>${order.customer_name}</strong>,</p>
-            <p>Thank you for ordering with QuickBite. Your payment has been received!</p>
-            <hr />
-            <h3>Delivery Details:</h3>
-            <p><strong>Address:</strong> ${order.delivery_address}<br/><strong>Phone:</strong> ${order.customer_phone}</p>
-            <h3>Order Items:</h3>
-            <ul>${itemsList}</ul>
-            <p style="font-size: 16px;"><strong>Total Paid:</strong> ₹${order.total_amount}</p>
-          </div>`
-      });
+      try {
+        const itemsList = (order.items || []).map(i => `<li>${i.qty}x <strong>${i.name}</strong> - ₹${i.price * i.qty}</li>`).join("");
+        await resend.emails.send({
+          from: process.env.SENDER_EMAIL || "onboarding@resend.dev",
+          to: order.customer_email,
+          subject: `Order Confirmed - QuickBite #${order.id.slice(0, 8)}`,
+          html: `<div style="font-family: sans-serif; max-width: 600px; margin: auto; border: 1px solid #eee; padding: 20px; border-radius: 8px;">
+              <h2 style="color: #ffb100;">Order Confirmed! 🎉</h2>
+              <p>Hi <strong>${order.customer_name}</strong>,</p>
+              <p>Thank you for ordering with QuickBite. Your payment has been received!</p>
+              <hr />
+              <h3>Delivery Details:</h3>
+              <p><strong>Address:</strong> ${order.delivery_address}<br/><strong>Phone:</strong> ${order.customer_phone}</p>
+              <h3>Order Items:</h3>
+              <ul>${itemsList}</ul>
+              <p style="font-size: 16px;"><strong>Total Paid:</strong> ₹${order.total_amount}</p>
+            </div>`
+        });
+        console.log("[EMAIL] Email sent successfully.");
+      } catch (emailErr) {
+        console.error("[EMAIL WARNING] Email failed (likely Resend Free Tier restriction), but order is confirmed.", emailErr.message);
+      }
     }
 
+    // Safely clear the cart and session details
     carts.delete(order.session_id);
     customerSessions.delete(order.session_id);
+    
     res.json({ status: "SUCCESS", message: "Payment confirmed.", order });
   } catch (err) {
+    console.error("[PAYMENT ERROR]", err.message);
     res.status(200).json({ error: "Confirmation failed", detail: err.message });
   }
 });
